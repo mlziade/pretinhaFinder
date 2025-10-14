@@ -3,66 +3,47 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 import os
-import numpy as np
+from ultralytics import YOLO
 
-# Load environment variables
 load_dotenv()
 
-# Configuration from .env
+# Configuration
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", 0))
 FRAME_SKIP = int(os.getenv("FRAME_SKIP", 5))
+YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.5))
 SCREENSHOT_DIR = Path(os.getenv("SCREENSHOT_DIR", "dog_screenshots"))
 SAVE_COOLDOWN = int(os.getenv("SAVE_COOLDOWN", 3))
 
-# Create screenshots directory
+# Create screenshots and models folders
 SCREENSHOT_DIR.mkdir(exist_ok=True)
-
-# Use MobileNet SSD for object detection (lightweight and compatible)
 MODEL_DIR = Path("models")
 MODEL_DIR.mkdir(exist_ok=True)
 
-PROTOTXT = MODEL_DIR / "MobileNetSSD_deploy.prototxt"
-MODEL = MODEL_DIR / "MobileNetSSD_deploy.caffemodel"
+# Set model path - all models stored in models folder
+model_path = MODEL_DIR / YOLO_MODEL
 
-def download_model():
-    """Download MobileNet SSD model files."""
-    if not PROTOTXT.exists():
-        print("Downloading model config...")
-        import urllib.request
-        urllib.request.urlretrieve(
-            "https://raw.githubusercontent.com/chuanqi305/MobileNet-SSD/master/voc/MobileNetSSD_deploy.prototxt",
-            str(PROTOTXT)
-        )
+print(f"Loading YOLOv8 model: {model_path}")
+model = YOLO(str(model_path))
 
-    if not MODEL.exists():
-        print("Downloading model weights (23MB)...")
-        import urllib.request
-        urllib.request.urlretrieve(
-            "https://github.com/PINTO0309/MobileNet-SSD-RealSense/raw/master/caffemodel/MobileNetSSD/MobileNetSSD_deploy.caffemodel",
-            str(MODEL)
-        )
-        print("Model downloaded successfully!")
-
-download_model()
-
-# Load the model
-net = cv2.dnn.readNetFromCaffe(str(PROTOTXT), str(MODEL))
-
-# MobileNet SSD class labels
-CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
-           "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
-           "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
-           "sofa", "train", "tvmonitor"]
-
-DOG_CLASS_ID = CLASSES.index("dog")
+DOG_CLASS_ID = 16
 
 def main():
-    # Open camera
-    cap = cv2.VideoCapture(CAMERA_INDEX)
+    # Open camera with DirectShow backend (more reliable on Windows)
+    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+
+    if not cap.isOpened():
+        print("Error: Could not open camera with DirectShow, trying default...")
+        cap = cv2.VideoCapture(CAMERA_INDEX)
 
     if not cap.isOpened():
         print("Error: Could not open camera")
         return
+
+    # Set camera properties for better performance
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS, 30)
 
     print("Camera opened. Press 'q' to quit.")
     print(f"Screenshots will be saved to: {SCREENSHOT_DIR.absolute()}")
@@ -80,59 +61,41 @@ def main():
 
         # Detect objects every N frames
         if frame_count % FRAME_SKIP == 0:
-            height, width = frame.shape[:2]
-
-            # Prepare frame for MobileNet SSD
-            blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)),
-                                         0.007843, (300, 300), 127.5)
-            net.setInput(blob)
-            detections = net.forward()
+            # Run YOLOv8 inference
+            results = model(frame, conf=CONFIDENCE_THRESHOLD, verbose=False)
 
             # Process detections
             dog_detected = False
-            boxes = []
             confidences = []
 
-            for i in range(detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
-                class_id = int(detections[0, 0, i, 1])
+            # Get the annotated frame with bounding boxes
+            annotated_frame = results[0].plot()
 
-                # Check if it's a dog with sufficient confidence
-                if class_id == DOG_CLASS_ID and confidence > 0.3:
-                    dog_detected = True
+            # Check if any dogs were detected
+            for result in results:
+                boxes = result.boxes
+                for box in boxes:
+                    class_id = int(box.cls[0])
+                    confidence = float(box.conf[0])
 
-                    # Get bounding box coordinates
-                    box = detections[0, 0, i, 3:7] * np.array([width, height, width, height])
-                    (startX, startY, endX, endY) = box.astype("int")
+                    if class_id == DOG_CLASS_ID:
+                        dog_detected = True
+                        confidences.append(confidence)
 
-                    boxes.append([startX, startY, endX, endY])
-                    confidences.append(float(confidence))
-
-            # Draw boxes and save if dog detected
-            display_frame = frame.copy()
+            # Save screenshot if dog detected
             if dog_detected:
-                # Draw bounding boxes
-                for i, box in enumerate(boxes):
-                    startX, startY, endX, endY = box
-                    cv2.rectangle(display_frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
-                    label = f"Dog: {confidences[i]*100:.1f}%"
-                    y = startY - 10 if startY - 10 > 10 else startY + 20
-                    cv2.putText(display_frame, label, (startX, y),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-                # Save screenshot with cooldown
                 current_time = datetime.now().timestamp()
                 if current_time - last_save_time > SAVE_COOLDOWN:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     max_conf = max(confidences)
                     filename = SCREENSHOT_DIR / f"dog_{timestamp}_conf{max_conf:.2f}.jpg"
                     cv2.imwrite(str(filename), frame)
-                    print(f"🐕 Dog detected! Screenshot saved: {filename}")
+                    print(f"Dog detected!!! Screenshot saved: {filename}")
                     last_save_time = current_time
 
-            cv2.imshow("Dog Detector", display_frame)
+            cv2.imshow("Dog Detector - YOLOv8", annotated_frame)
         else:
-            cv2.imshow("Dog Detector", frame)
+            cv2.imshow("Dog Detector - YOLOv8", frame)
 
         # Press 'q' to quit
         if cv2.waitKey(1) & 0xFF == ord('q'):
