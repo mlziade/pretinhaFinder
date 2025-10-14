@@ -1,0 +1,11 @@
+dog_screenshots/
+*.jpg
+*.png
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+models/
+
+.claude
