@@ -9,3 +9,6 @@ venv/
 models/
 
 .claude
+
+runs/
+training_pretinha/
